@@ -3,18 +3,21 @@ HAM10000 DINOv2-LoRA Skin Lesion Classifier
 FastAPI Backend - Loads model from HuggingFace Hub at startup
 """
 
-import os
 import io
+import json
+import os
+
+import numpy as np
 import torch
 import torch.nn as nn
+import torchvision.transforms as T
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import snapshot_download
 from peft import PeftModel
-from transformers import Dinov2Model
 from PIL import Image
-import torchvision.transforms as T
-from contextlib import asynccontextmanager
+from transformers import Dinov2Model
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 HUB_REPO = "Ganymede981/ham10000-vit"
@@ -41,8 +44,20 @@ LABEL_DESCRIPTIONS = {
 }
 
 # Global model reference
-model     = None
-transform = None
+model      = None
+transform  = None
+THRESHOLDS = {}   # populated from class_thresholds.json at startup
+
+# Default thresholds (fallback if JSON not found on Hub)
+_DEFAULT_THRESHOLDS = {
+    "actinic_keratoses":              0.5,
+    "basal_cell_carcinoma":           0.5,
+    "benign_keratosis-like_lesions":  0.5,
+    "dermatofibroma":                 0.5,
+    "melanocytic_Nevi":               0.5,
+    "melanoma":                       0.5,
+    "vascular_lesions":               0.5,
+}
 
 
 # ── Model Definition ───────────────────────────────────────────────────────────
@@ -59,21 +74,76 @@ class DINOv2Classifier(nn.Module):
         return self.head(torch.cat([cls, mean], dim=1))
 
 
+# ── Threshold-aware prediction ────────────────────────────────────────────────
+def predict_calibrated(
+    probs: np.ndarray,
+    threshold_map: dict,
+) -> dict:
+    """
+    Apply per-class thresholds via margin scoring.
+
+    margin[i] = prob[i] - threshold[i]
+
+    The class with the highest margin wins.  This is equivalent to argmax when
+    all thresholds are equal, but it shifts the decision boundary per class
+    when they differ — meaning rare / high-risk classes (e.g. melanoma) can be
+    given lower thresholds so the model is more sensitive to them.
+
+    If the winning margin is still negative (no class clears its threshold),
+    we still return the argmax but set ``threshold_cleared=False`` so the
+    caller can decide how to surface that uncertainty in the UI.
+    """
+    thresholds = np.array(
+        [threshold_map.get(label, 0.5) for label in HAM_LABELS],
+        dtype=np.float32,
+    )
+    margins     = probs - thresholds
+    pred_idx    = int(np.argmax(margins))
+    pred_label  = HAM_LABELS[pred_idx]
+
+    return {
+        "prediction":       pred_label,
+        "description":      LABEL_DESCRIPTIONS[pred_label],
+        "confidence":       round(float(probs[pred_idx]), 4),
+        "threshold":        round(float(thresholds[pred_idx]), 4),
+        "threshold_cleared": bool(margins[pred_idx] >= 0),
+        "probabilities":    {
+            label: round(float(p), 4)
+            for label, p in zip(HAM_LABELS, probs)
+        },
+        "thresholds":       {
+            label: round(float(t), 4)
+            for label, t in zip(HAM_LABELS, thresholds)
+        },
+        "descriptions":     LABEL_DESCRIPTIONS,
+    }
+
+
 # ── Startup / Shutdown ─────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, transform
+    global model, transform, THRESHOLDS
     print(f"[INFO] Loading model from Hub: {HUB_REPO}")
     print(f"[INFO] Device: {DEVICE}")
 
     local = snapshot_download(HUB_REPO)
 
-    # Rebuild backbone + LoRA adapter
-    base      = Dinov2Model.from_pretrained("facebook/dinov2-base")
-    lora_dir  = os.path.join(local, "dinov2_lora")
-    base      = PeftModel.from_pretrained(base, lora_dir)
+    # ── Load thresholds ──────────────────────────────────────────────────────
+    thresholds_path = os.path.join(local, "class_thresholds.json")
+    if os.path.isfile(thresholds_path):
+        with open(thresholds_path) as f:
+            THRESHOLDS = json.load(f)
+        print(f"[INFO] Thresholds loaded: {THRESHOLDS}")
+    else:
+        THRESHOLDS = _DEFAULT_THRESHOLDS
+        print("[WARN] class_thresholds.json not found on Hub — using default 0.5 thresholds.")
 
-    # Rebuild classification head (must match training architecture)
+    # ── Rebuild backbone + LoRA adapter ─────────────────────────────────────
+    base     = Dinov2Model.from_pretrained("facebook/dinov2-base")
+    lora_dir = os.path.join(local, "dinov2_lora")
+    base     = PeftModel.from_pretrained(base, lora_dir)
+
+    # ── Rebuild classification head (must match training architecture) ───────
     head = nn.Sequential(
         nn.LayerNorm(768 * 2),
         nn.Dropout(0.1),
@@ -84,7 +154,7 @@ async def lifespan(app: FastAPI):
 
     model = DINOv2Classifier(base, head).to(DEVICE).eval()
 
-    # HAM10000 channel statistics
+    # ── HAM10000 channel statistics ──────────────────────────────────────────
     transform = T.Compose([
         T.Resize((224, 224)),
         T.ToTensor(),
@@ -149,18 +219,12 @@ async def predict(file: UploadFile):
 
     with torch.no_grad():
         logits = model(tensor)
-        probs  = torch.softmax(logits, dim=-1)[0].cpu().tolist()
+        probs  = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
-    pred_idx   = int(torch.argmax(torch.tensor(probs)))
-    pred_label = HAM_LABELS[pred_idx]
+    return predict_calibrated(probs, threshold_map=THRESHOLDS)
 
-    return {
-        "prediction":        pred_label,
-        "description":       LABEL_DESCRIPTIONS[pred_label],
-        "confidence":        round(probs[pred_idx], 4),
-        "probabilities":     {
-            label: round(p, 4)
-            for label, p in zip(HAM_LABELS, probs)
-        },
-        "descriptions":      LABEL_DESCRIPTIONS,
-    }
+
+@app.get("/thresholds")
+def get_thresholds():
+    """Return the currently active per-class thresholds."""
+    return {"thresholds": THRESHOLDS}

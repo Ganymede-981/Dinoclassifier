@@ -235,6 +235,31 @@
     .result-label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
     .result-name  { font-size: 1.45rem; font-weight: 800; line-height: 1.2; }
     .result-desc  { font-size: .9rem; color: var(--muted); margin-top: 3px; }
+
+    /* threshold pill under name */
+    .threshold-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      margin-top: 6px;
+      padding: 3px 10px; border-radius: 100px;
+      font-size: .72rem; font-weight: 600;
+      background: rgba(255,255,255,.07);
+      color: var(--muted);
+    }
+    .threshold-pill.cleared  { background: rgba(16,185,129,.12); color: #34d399; }
+    .threshold-pill.uncleared { background: rgba(245,158,11,.12); color: #fbbf24; }
+
+    /* low-confidence banner */
+    .low-conf-banner {
+      display: none;
+      margin-bottom: 20px;
+      padding: 12px 16px;
+      border-radius: var(--radius-sm);
+      background: rgba(245,158,11,.08);
+      border: 1px solid rgba(245,158,11,.25);
+      font-size: .83rem; color: #fcd34d;
+      line-height: 1.5;
+    }
+
     .result-conf  {
       margin-left: auto;
       text-align: center;
@@ -380,6 +405,10 @@
 
   <!-- Results -->
   <div id="results">
+    <div class="low-conf-banner" id="low-conf-banner">
+      ⚠️ <strong>Below calibrated threshold</strong> — the model's top prediction did not clear its per-class decision threshold. Results may be less reliable; please consult a specialist.
+    </div>
+
     <div class="result-top">
       <div class="result-badge-wrap">
         <div class="result-badge" id="result-badge"></div>
@@ -388,6 +417,7 @@
         <div class="result-label">Top Prediction</div>
         <div class="result-name" id="result-name"></div>
         <div class="result-desc" id="result-desc"></div>
+        <div class="threshold-pill" id="threshold-pill"></div>
       </div>
       <div class="result-conf">
         <div class="conf-circle" id="conf-circle"></div>
@@ -519,8 +549,13 @@
 
   // ── Render results ──────────────────────────────────────────────────────────
   function renderResults(data) {
-    const { prediction, description, confidence, probabilities } = data;
+    const { prediction, description, confidence, probabilities,
+            threshold, threshold_cleared, thresholds } = data;
     const info = LABEL_ICONS[prediction] || { icon: '🔬', bg: 'rgba(99,102,241,.15)', color: '#a5b4fc' };
+
+    // Low-confidence banner
+    const banner = document.getElementById('low-conf-banner');
+    banner.style.display = threshold_cleared === false ? 'block' : 'none';
 
     // Badge
     const badge = document.getElementById('result-badge');
@@ -530,6 +565,18 @@
     // Name / desc
     document.getElementById('result-name').textContent = prediction.replace(/_/g, ' ');
     document.getElementById('result-desc').textContent = description;
+
+    // Threshold pill
+    const pill = document.getElementById('threshold-pill');
+    if (threshold !== undefined) {
+      pill.textContent = threshold_cleared
+        ? `✓ clears threshold (≥${(threshold * 100).toFixed(0)}%)`
+        : `✗ below threshold (<${(threshold * 100).toFixed(0)}%)`;
+      pill.className = 'threshold-pill ' + (threshold_cleared ? 'cleared' : 'uncleared');
+      pill.style.display = 'inline-flex';
+    } else {
+      pill.style.display = 'none';
+    }
 
     // Confidence circle
     const pct = Math.round(confidence * 100);
@@ -545,12 +592,15 @@
 
     const sorted = Object.entries(probabilities).sort((a, b) => b[1] - a[1]);
     sorted.forEach(([label, prob], idx) => {
-      const pctVal = Math.round(prob * 10000) / 100;
-      const isTop  = label === prediction;
+      const pctVal   = Math.round(prob * 10000) / 100;
+      const isTop    = label === prediction;
+      const thr      = thresholds ? thresholds[label] : null;
+      const thrPct   = thr !== null ? (thr * 100).toFixed(0) : null;
+      const thrTitle = thrPct ? ` (threshold: ${thrPct}%)` : '';
       const row = document.createElement('div');
       row.className = 'prob-row';
       row.innerHTML = `
-        <div class="prob-name" title="${label.replace(/_/g,' ')}">${label.replace(/_/g,' ')}</div>
+        <div class="prob-name" title="${label.replace(/_/g,' ')}${thrTitle}">${label.replace(/_/g,' ')}</div>
         <div class="prob-track">
           <div class="prob-fill${isTop ? ' top' : ''}" id="fill-${idx}"></div>
         </div>
