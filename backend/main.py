@@ -142,7 +142,10 @@ async def lifespan(app: FastAPI):
     thresholds_path = os.path.join(local, "class_thresholds.json")
     if os.path.isfile(thresholds_path):
         with open(thresholds_path) as f:
-            THRESHOLDS = json.load(f)
+            raw = json.load(f)
+        # Support both flat   {"melanoma": 0.55, ...}
+        # and nested          {"thresholds": {"melanoma": 0.55, ...}, "val_f1": {...}}
+        THRESHOLDS = raw.get("thresholds", raw)
         print(f"[INFO] Thresholds loaded: {THRESHOLDS}")
     else:
         THRESHOLDS = _DEFAULT_THRESHOLDS
