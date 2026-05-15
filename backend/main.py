@@ -7,6 +7,9 @@ import io
 import json
 import os
 
+# Suppress the Windows symlink warning from huggingface_hub
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -126,7 +129,14 @@ async def lifespan(app: FastAPI):
     print(f"[INFO] Loading model from Hub: {HUB_REPO}")
     print(f"[INFO] Device: {DEVICE}")
 
-    local = snapshot_download(HUB_REPO)
+    # Download to a local folder beside the backend so Windows doesn't need
+    # symlink privileges (avoids OSError WinError 1314 on non-dev-mode machines)
+    _hub_cache = os.path.join(os.path.dirname(__file__), ".hub_cache")
+    local = snapshot_download(
+        HUB_REPO,
+        local_dir=_hub_cache,
+        local_dir_use_symlinks=False,
+    )
 
     # ── Load thresholds ──────────────────────────────────────────────────────
     thresholds_path = os.path.join(local, "class_thresholds.json")

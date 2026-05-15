@@ -27,6 +27,9 @@ final_model/
 *.safetensors
 *.bin
 
+# Local model download cache (backend uses local_dir_use_symlinks=False)
+.hub_cache/
+
 # HuggingFace cache
 .cache/
 
