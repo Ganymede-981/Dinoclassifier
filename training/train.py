@@ -1,17 +1,14 @@
-"""
-HAM10000 DINOv2-LoRA — Training Entry-point
-Run:  python train.py
-"""
-
 import gc
 import os
 import sys
 
 import torch
-from huggingface_hub import HfApi, login, snapshot_download, upload_folder
+from dotenv import load_dotenv
+from huggingface_hub import HfApi, login, snapshot_download, upload_folder, list_repo_files
 from peft import PeftModel
 from transformers import EarlyStoppingCallback, TrainingArguments
-from kaggle_secrets import UserSecretsClient          # remove on non-Kaggle env
+
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -28,40 +25,32 @@ from dataset import (
 from trainer import HAMTrainer, SoftTargetCrossEntropy
 from metrics import compute_metrics
 
-# ── Auth ───────────────────────────────────────────────────────────────────────
-hf_token = UserSecretsClient().get_secret("HF_TOKEN")
+hf_token = os.environ.get("HF_TOKEN", "")
+if not hf_token:
+    raise EnvironmentError("HF_TOKEN is not set. Add it to the .env file at the project root.")
 login(hf_token)
 
-# ── Device ─────────────────────────────────────────────────────────────────────
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-print(f"[INFO] Device={DEVICE}")
+print(f"Device={DEVICE}")
 
-# ── Data ───────────────────────────────────────────────────────────────────────
 train_raw, val_raw, test_raw = load_splits()
 train_ds = HAMDataset(train_raw, augment=True)
 val_ds   = HAMDataset(val_raw,   augment=False)
 test_ds  = HAMDataset(test_raw,  augment=False)
-print(f"[INFO] train={len(train_ds):,}  val={len(val_ds):,}  test={len(test_ds):,}")
+print(f"train={len(train_ds):,}  val={len(val_ds):,}  test={len(test_ds):,}")
 
 sampler, class_weights = build_sampler_and_weights(train_raw)
 class_weights = class_weights.to(DEVICE)
 
 loss_fn = SoftTargetCrossEntropy(weight=class_weights, label_smoothing=LABEL_SMOOTHING)
 
-# ── Model ──────────────────────────────────────────────────────────────────────
-# Import here (after sys.path tweak) so the module resolves correctly
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "model"))
-from architecture import build_model          # noqa: E402
+from model.architecture import build_model
 
 gc.collect(); torch.cuda.empty_cache()
-print(f"[INFO] GPU free: {torch.cuda.mem_get_info()[0] / 1e9:.2f} GB")
+print(f"GPU free: {torch.cuda.mem_get_info()[0] / 1e9:.2f} GB")
 
-HfApi().create_repo(HUB_REPO, token=hf_token, exist_ok=True)
-
-# ── Resume detection ───────────────────────────────────────────────────────────
-from huggingface_hub import list_repo_files          # noqa: E402
+HfApi().create_repo(HUB_REPO, token=hf_token, private=False, exist_ok=True)
 
 resume_from = None
 model       = None
@@ -83,9 +72,10 @@ try:
     )
 
     if resume_folder:
-        print(f"[INFO] Checkpoint found → {resume_folder}. Downloading...")
+        print(f"Checkpoint found → {resume_folder}. Downloading...")
+        _resume_dir = os.path.join(os.path.dirname(__file__), "..", "resume")
         local       = snapshot_download(HUB_REPO, token=hf_token,
-                                        local_dir="/kaggle/working/resume")
+                                        local_dir=_resume_dir)
         resume_from = os.path.join(local, resume_folder)
 
         model    = build_model(lora_r=LORA_R, lora_alpha=LORA_ALPHA,
@@ -99,10 +89,10 @@ try:
         if os.path.isfile(head_path):
             model.head.load_state_dict(torch.load(head_path, map_location="cpu"))
     else:
-        print("[INFO] No checkpoint found — starting fresh.")
+        print("No checkpoint found — starting fresh.")
 
 except Exception as e:
-    print(f"[WARN] Hub lookup failed ({e}) — starting fresh.")
+    print(f"Hub lookup failed ({e}) — starting fresh.")
 
 if model is None:
     model = build_model(lora_r=LORA_R, lora_alpha=LORA_ALPHA,
@@ -110,7 +100,6 @@ if model is None:
 
 model.to(DEVICE)
 
-# ── Training Args ──────────────────────────────────────────────────────────────
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     num_train_epochs=EPOCHS,
@@ -151,15 +140,13 @@ trainer = HAMTrainer(
     loss_fn=loss_fn,
 )
 
-# ── Train ──────────────────────────────────────────────────────────────────────
-print(f"[INFO] {'Resuming' if resume_from else 'Starting fresh'} training...")
+print(f"{'Resuming' if resume_from else 'Starting fresh'} training...")
 trainer.train(resume_from_checkpoint=resume_from)
 
-# ── Save final model ───────────────────────────────────────────────────────────
 os.makedirs(f"{FINAL_MODEL_DIR}/dinov2_lora", exist_ok=True)
 model.dinov2.save_pretrained(f"{FINAL_MODEL_DIR}/dinov2_lora")
 torch.save(model.head.state_dict(), f"{FINAL_MODEL_DIR}/head.pt")
-print("[INFO] Final model saved locally.")
+print("Final model saved locally.")
 
 upload_folder(
     repo_id=HUB_REPO,
@@ -167,4 +154,4 @@ upload_folder(
     commit_message="HAM10000 DINOv2-LoRA final",
     token=hf_token,
 )
-print("[INFO] Done — model pushed to Hub.")
+print("Done, model pushed to Hub.")

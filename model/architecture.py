@@ -1,8 +1,3 @@
-"""
-HAM10000 DINOv2-LoRA — Model Architecture
-Defines the DINOv2Classifier used for both training and inference.
-"""
-
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -17,13 +12,6 @@ class ModelOutput(HFModelOutput):
 
 
 class DINOv2Classifier(nn.Module):
-    """
-    DINOv2-base backbone with a lightweight two-layer head.
-
-    Head input  = [CLS token | mean of patch tokens]  →  768 * 2 = 1536 dims
-    Head output = num_classes logits
-    """
-
     def __init__(self, num_classes: int = 7, dropout: float = 0.1):
         super().__init__()
         self.dinov2 = Dinov2Model.from_pretrained("facebook/dinov2-base")
@@ -50,7 +38,6 @@ def build_model(
     lora_dropout: float = 0.05,
     head_dropout: float = 0.1,
 ) -> DINOv2Classifier:
-    """Build a LoRA-wrapped DINOv2Classifier with gradient checkpointing."""
     model = DINOv2Classifier(num_classes=num_classes, dropout=head_dropout)
 
     lora_cfg = LoraConfig(

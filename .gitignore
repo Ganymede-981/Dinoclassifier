@@ -29,6 +29,7 @@ final_model/
 
 # Local model download cache (backend uses local_dir_use_symlinks=False)
 .hub_cache/
+**/.hub_cache/
 
 # HuggingFace cache
 .cache/
@@ -45,6 +46,9 @@ final_model/
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets
+.env
 
 # IDE
 .vscode/

@@ -1,7 +1,3 @@
-"""
-HAM10000 DINOv2-LoRA — Dataset & DataLoaders
-"""
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
@@ -9,7 +5,7 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import v2 as T2
 from collections import Counter
-from datasets import load_dataset, ClassLabel
+from datasets import load_dataset, ClassLabel, concatenate_datasets
 
 from config import (
     DATASET_ID, LABEL_FIELD, VAL_SPLIT, SEED,
@@ -19,26 +15,30 @@ from config import (
 )
 
 
-# ── Label helpers ──────────────────────────────────────────────────────────────
 LABEL2IDX = {l: i for i, l in enumerate(HAM_LABELS)}
 IDX2LABEL = {i: l for i, l in enumerate(HAM_LABELS)}
 
 
 def load_splits():
-    """
-    Download / cache marmal88/skin_cancer, cast dx to ClassLabel,
-    and return (train_raw, val_raw, test_raw) HF Dataset splits.
-    """
-    print(f"[INFO] Loading {DATASET_ID}...")
+    print(f"Loading {DATASET_ID}...")
     raw = load_dataset(DATASET_ID)
+    print(raw)
 
-    # Cast dx column to ClassLabel so stratified splitting works
     new_features = raw["train"].features.copy()
     new_features[LABEL_FIELD] = ClassLabel(names=HAM_LABELS)
+
     raw["train"] = raw["train"].cast(new_features)
     raw["test"]  = raw["test"].cast(new_features)
+    if "validation" in raw:
+        raw["validation"] = raw["validation"].cast(new_features)
 
-    tv_split = raw["train"].train_test_split(
+    # ── Combine train + validation, then custom 85 / 15 split ────────────
+    if "validation" in raw:
+        combined = concatenate_datasets([raw["train"], raw["validation"]])
+    else:
+        combined = raw["train"]
+
+    tv_split = combined.train_test_split(
         test_size=VAL_SPLIT,
         seed=SEED,
         stratify_by_column=LABEL_FIELD,
@@ -46,7 +46,6 @@ def load_splits():
     return tv_split["train"], tv_split["test"], raw["test"]
 
 
-# ── PyTorch Dataset ────────────────────────────────────────────────────────────
 class HAMDataset(Dataset):
     def __init__(self, hf_split, augment: bool = False):
         self.data = hf_split
@@ -89,7 +88,6 @@ class HAMDataset(Dataset):
         return {"pixel_values": self.transform(img), "labels": self._get_label(s)}
 
 
-# ── Collators ──────────────────────────────────────────────────────────────────
 _cutmix = T2.CutMix(num_classes=NUM_CLASSES, alpha=CUTMIX_ALPHA)
 _mixup  = T2.MixUp(num_classes=NUM_CLASSES,  alpha=MIXUP_ALPHA)
 
@@ -112,12 +110,7 @@ def eval_collate_fn(batch):
     return {"pixel_values": pixel_values, "labels": labels}
 
 
-# ── Sampler ────────────────────────────────────────────────────────────────────
 def build_sampler_and_weights(train_raw):
-    """
-    Returns (WeightedRandomSampler, class_weights_tensor).
-    class_weights: inverse-frequency, clamped to [0.5, 20].
-    """
     train_labels = list(train_raw[LABEL_FIELD])
     if isinstance(train_labels[0], str):
         train_labels = [LABEL2IDX[l] for l in train_labels]

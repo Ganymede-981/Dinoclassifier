@@ -1,8 +1,3 @@
-"""
-HAM10000 DINOv2-LoRA — Test-Set Evaluation
-Run:  python evaluate.py
-"""
-
 import json
 import os
 import sys
@@ -10,6 +5,7 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from dotenv import load_dotenv
 from huggingface_hub import login, snapshot_download
 from peft import PeftModel
 from sklearn.metrics import (
@@ -25,18 +21,15 @@ from config import HUB_REPO, HAM_LABELS, NUM_CLASSES
 from dataset import load_splits, HAMDataset, eval_collate_fn
 from torch.utils.data import DataLoader
 
-# ── Auth ───────────────────────────────────────────────────────────────────────
-try:
-    from kaggle_secrets import UserSecretsClient
-    hf_token = UserSecretsClient().get_secret("HF_TOKEN")
-    login(hf_token)
-except Exception:
-    pass   # token already cached / not on Kaggle
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+hf_token = os.environ.get("HF_TOKEN", "")
+if not hf_token:
+    raise EnvironmentError("HF_TOKEN is not set. Add it to the .env file at the project root.")
+login(hf_token)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ── Load Model ─────────────────────────────────────────────────────────────────
-print(f"[INFO] Downloading model from {HUB_REPO}...")
+print(f"Downloading model from {HUB_REPO}...")
 local = snapshot_download(HUB_REPO)
 
 base      = Dinov2Model.from_pretrained("facebook/dinov2-base")
@@ -62,15 +55,12 @@ class DINOv2Classifier(nn.Module):
         return self.head(torch.cat([cls, mean], dim=1))
 
 model = DINOv2Classifier().to(DEVICE).eval()
-print("[INFO] Model ready.")
+print("Model ready.")
 
-# ── Data ───────────────────────────────────────────────────────────────────────
 _, _, test_raw = load_splits()
 test_ds  = HAMDataset(test_raw, augment=False)
 test_dl  = DataLoader(test_ds, batch_size=64, shuffle=False,
                       collate_fn=eval_collate_fn, num_workers=4)
-
-# ── Inference ──────────────────────────────────────────────────────────────────
 all_logits, all_labels = [], []
 
 with torch.no_grad():
@@ -85,8 +75,7 @@ labels = np.array(all_labels)
 preds  = np.argmax(logits, axis=-1)
 probs  = torch.softmax(torch.tensor(logits, dtype=torch.float32), dim=-1).numpy()
 
-# ── Metrics ────────────────────────────────────────────────────────────────────
-print("\n=== Classification Report ===")
+print("Classification Report")
 print(classification_report(labels, preds, target_names=HAM_LABELS, zero_division=0))
 
 acc  = float(accuracy_score(labels, preds))
@@ -110,9 +99,8 @@ results = {
 }
 with open("ham10000_results.json", "w") as f:
     json.dump(results, f, indent=2)
-print("[INFO] Results saved to ham10000_results.json")
+print("Results saved to ham10000_results.json")
 
-# ── Plots ──────────────────────────────────────────────────────────────────────
 cm      = confusion_matrix(labels, preds)
 cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
 per_f1  = f1_score(labels, preds, average=None, zero_division=0)
@@ -144,4 +132,4 @@ for i, v in enumerate(per_f1):
 plt.tight_layout()
 plt.savefig("ham10000_eval.png", dpi=150)
 plt.show()
-print("[INFO] Plot saved to ham10000_eval.png")
+print("Plot saved to ham10000_eval.png")

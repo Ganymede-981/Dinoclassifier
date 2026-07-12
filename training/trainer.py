@@ -1,7 +1,3 @@
-"""
-HAM10000 DINOv2-LoRA — Custom Trainer & Loss
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,15 +7,7 @@ from transformers import Trainer
 from config import LABEL_SMOOTHING
 from dataset import train_collate_fn, eval_collate_fn
 
-
-# ── Loss ───────────────────────────────────────────────────────────────────────
 class SoftTargetCrossEntropy(nn.Module):
-    """
-    Handles both:
-      • hard labels  (LongTensor)  → standard weighted CE
-      • soft labels  (FloatTensor) → manual CE (from CutMix / MixUp)
-    """
-
     def __init__(self, weight=None, label_smoothing: float = LABEL_SMOOTHING):
         super().__init__()
         self.weight = weight
@@ -43,16 +31,7 @@ class SoftTargetCrossEntropy(nn.Module):
             loss = -(labels * log_p).sum(dim=-1)
         return loss.mean()
 
-
-# ── Trainer ────────────────────────────────────────────────────────────────────
 class HAMTrainer(Trainer):
-    """
-    Extends HF Trainer with:
-      • WeightedRandomSampler + CutMix/MixUp for training
-      • Plain eval collator for validation / test
-      • SoftTargetCrossEntropy loss
-    """
-
     def __init__(self, *args, sampler, loss_fn, **kwargs):
         super().__init__(*args, **kwargs)
         self._sampler  = sampler
