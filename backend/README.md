@@ -1,14 +1,3 @@
----
-title: HAM10000 Skin Lesion Classifier API
-emoji: 🔬
-colorFrom: indigo
-colorTo: purple
-sdk: docker
-app_port: 7860
-pinned: false
-startup_duration_timeout: 1h
----
-
 # HAM10000 Skin Lesion Classifier — Backend API
 
 FastAPI backend serving a **DINOv2-LoRA** model fine-tuned on the HAM10000 skin lesion dataset.  
