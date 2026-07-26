@@ -16,7 +16,10 @@ from peft import PeftModel
 from PIL import Image
 from transformers import Dinov2Model
 
-HUB_REPO = "Ganymede981/ham10000-vit"
+HUB_REPO   = "Ganymede981/ham10000-vit"
+# Absolute path written by download_model.py at Docker BUILD time.
+# At runtime, the weights are already on disk — no download needed.
+_HUB_CACHE = "/app/.hub_cache"
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
 
 HAM_LABELS = [
@@ -99,16 +102,20 @@ def predict_calibrated(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global model, transform, THRESHOLDS
-    print(f"[INFO] Loading model from Hub: {HUB_REPO}")
+    print(f"[INFO] Loading model from pre-baked cache: {_HUB_CACHE}")
     print(f"[INFO] Device: {DEVICE}")
 
-    _hub_cache = os.path.join(os.path.dirname(__file__), ".hub_cache")
+    # ── Resolve local weights directory ──────────────────────────────────────
+    # In the Docker image, weights were downloaded by download_model.py at
+    # BUILD time. snapshot_download is idempotent: if all files are already
+    # present it returns immediately without any network traffic.
     local = snapshot_download(
         HUB_REPO,
-        local_dir=_hub_cache,
+        local_dir=_HUB_CACHE,
         local_dir_use_symlinks=False,
     )
 
+    # ── Load thresholds ───────────────────────────────────────────────────────
     thresholds_path = os.path.join(local, "class_thresholds.json")
     if os.path.isfile(thresholds_path):
         with open(thresholds_path) as f:
@@ -117,8 +124,11 @@ async def lifespan(app: FastAPI):
         print(f"[INFO] Thresholds loaded: {THRESHOLDS}")
     else:
         THRESHOLDS = _DEFAULT_THRESHOLDS
-        print("[WARN] class_thresholds.json not found on Hub — using default 0.5 thresholds.")
+        print("[WARN] class_thresholds.json not found — using default 0.5 thresholds.")
 
+    # ── Build model from cached weights ───────────────────────────────────────
+    # transformers reads facebook/dinov2-base from HF_HOME (/app/.cache),
+    # which was populated by download_model.py — no internet call needed.
     base     = Dinov2Model.from_pretrained("facebook/dinov2-base")
     lora_dir = os.path.join(local, "dinov2_lora")
     base     = PeftModel.from_pretrained(base, lora_dir)
