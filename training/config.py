@@ -1,7 +1,5 @@
 DATASET_ID  = "marmal88/skin_cancer"
 LABEL_FIELD = "dx"
-VAL_SPLIT   = 0.15
-SEED        = 42
 
 HAM_LABELS  = [
     "actinic_keratoses",

@@ -5,10 +5,10 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import v2 as T2
 from collections import Counter
-from datasets import load_dataset, ClassLabel, concatenate_datasets
+from datasets import load_dataset, ClassLabel
 
 from config import (
-    DATASET_ID, LABEL_FIELD, VAL_SPLIT, SEED,
+    DATASET_ID, LABEL_FIELD,
     HAM_LABELS, NUM_CLASSES, IMAGE_SIZE,
     NORMALIZE_MEAN, NORMALIZE_STD,
     CUTMIX_ALPHA, MIXUP_ALPHA,
@@ -27,23 +27,19 @@ def load_splits():
     new_features = raw["train"].features.copy()
     new_features[LABEL_FIELD] = ClassLabel(names=HAM_LABELS)
 
-    raw["train"] = raw["train"].cast(new_features)
-    raw["test"]  = raw["test"].cast(new_features)
-    if "validation" in raw:
-        raw["validation"] = raw["validation"].cast(new_features)
+    # Cast all three official splits to ClassLabel
+    raw["train"]      = raw["train"].cast(new_features)
+    raw["validation"] = raw["validation"].cast(new_features)
+    raw["test"]       = raw["test"].cast(new_features)
 
-    # ── Combine train + validation, then custom 85 / 15 split ────────────
-    if "validation" in raw:
-        combined = concatenate_datasets([raw["train"], raw["validation"]])
-    else:
-        combined = raw["train"]
+    train_raw = raw["train"]       # 9,577 samples
+    val_raw   = raw["validation"]  # 2,492 samples (official split)
+    test_raw  = raw["test"]        # 1,285 samples (held-out)
 
-    tv_split = combined.train_test_split(
-        test_size=VAL_SPLIT,
-        seed=SEED,
-        stratify_by_column=LABEL_FIELD,
-    )
-    return tv_split["train"], tv_split["test"], raw["test"]
+    print(f"[INFO] Split sizes -> Train={len(train_raw):,}  "
+          f"Val={len(val_raw):,}  Test={len(test_raw):,}")
+
+    return train_raw, val_raw, test_raw
 
 
 class HAMDataset(Dataset):
