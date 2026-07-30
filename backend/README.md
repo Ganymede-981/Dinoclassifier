@@ -1,3 +1,12 @@
+---
+title: Dinoxham10000
+emoji: 🔬
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # HAM10000 Skin Lesion Classifier — Backend API
 
 FastAPI backend serving a **DINOv2-LoRA** model fine-tuned on the HAM10000 skin lesion dataset.  
