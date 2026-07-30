@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -15,6 +16,15 @@ from huggingface_hub import snapshot_download
 from peft import PeftModel
 from PIL import Image
 from transformers import Dinov2Model
+
+from llm_report import generate_report
+
+logger = logging.getLogger(__name__)
+
+# HF token used by both snapshot_download (model weights) and the
+# Inference API (LLM report).  Set as a Space / Docker secret — never
+# hardcode.  If absent, report generation silently returns the fallback.
+HF_TOKEN: str = os.environ.get("HF_TOKEN", "")
 
 HUB_REPO   = "Ganymede981/ham10000-vit"
 # Absolute path written by download_model.py at Docker BUILD time.
@@ -70,6 +80,23 @@ class DINOv2Classifier(nn.Module):
         return self.head(torch.cat([cls, mean], dim=1))
 
 
+# Margin gap below which the top-2 classes are considered "too close"
+# and the result is flagged inconclusive regardless of threshold.
+_CLOSE_MARGIN_GAP = 0.05
+
+
+def _confidence_level(prob: float, threshold: float, inconclusive: bool) -> str:
+    """Map numeric confidence to a human-readable tier."""
+    if inconclusive:
+        return "inconclusive"
+    excess = prob - threshold          # how far above threshold
+    if excess >= 0.20:
+        return "high"
+    if excess >= 0.08:
+        return "moderate"
+    return "low"
+
+
 def predict_calibrated(
     probs: np.ndarray,
     threshold_map: dict,
@@ -78,25 +105,42 @@ def predict_calibrated(
         [threshold_map.get(label, 0.5) for label in HAM_LABELS],
         dtype=np.float32,
     )
-    margins     = probs - thresholds
-    pred_idx    = int(np.argmax(margins))
-    pred_label  = HAM_LABELS[pred_idx]
+    margins  = probs - thresholds
+    sorted_i = np.argsort(margins)[::-1]   # descending
+    pred_idx = int(sorted_i[0])
+    sec_idx  = int(sorted_i[1])
+
+    pred_label = HAM_LABELS[pred_idx]
+    pred_prob  = float(probs[pred_idx])
+    pred_thr   = float(thresholds[pred_idx])
+
+    # Inconclusive when: (a) best margin is negative, or
+    # (b) gap between top-2 margins is suspiciously small.
+    top_margin_gap = float(margins[pred_idx] - margins[sec_idx])
+    inconclusive = (
+        margins[pred_idx] < 0
+        or top_margin_gap < _CLOSE_MARGIN_GAP
+    )
+
+    conf_level = _confidence_level(pred_prob, pred_thr, inconclusive)
 
     return {
-        "prediction":       pred_label,
-        "description":      LABEL_DESCRIPTIONS[pred_label],
-        "confidence":       round(float(probs[pred_idx]), 4),
-        "threshold":        round(float(thresholds[pred_idx]), 4),
+        "prediction":        pred_label,
+        "description":       LABEL_DESCRIPTIONS[pred_label],
+        "confidence":        round(pred_prob, 4),
+        "threshold":         round(pred_thr, 4),
         "threshold_cleared": bool(margins[pred_idx] >= 0),
-        "probabilities":    {
+        "inconclusive":      inconclusive,
+        "confidence_level":  conf_level,
+        "probabilities":     {
             label: round(float(p), 4)
             for label, p in zip(HAM_LABELS, probs)
         },
-        "thresholds":       {
+        "thresholds":        {
             label: round(float(t), 4)
             for label, t in zip(HAM_LABELS, thresholds)
         },
-        "descriptions":     LABEL_DESCRIPTIONS,
+        "descriptions":      LABEL_DESCRIPTIONS,
     }
 
 @asynccontextmanager
@@ -202,7 +246,36 @@ async def predict(file: UploadFile):
         logits = model(tensor)
         probs  = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
-    return predict_calibrated(probs, threshold_map=THRESHOLDS)
+    eval_result = predict_calibrated(probs, threshold_map=THRESHOLDS)
+
+    # ── LLM report ────────────────────────────────────────────────────────────
+    # Generate asynchronously in a thread so the heavy Inference API call
+    # doesn't block the event loop.  If HF_TOKEN is empty the report module
+    # returns the graceful fallback dict immediately without any network call.
+    llm_report: dict = {"headline": "LLM report unavailable (no HF_TOKEN set)"}
+    if HF_TOKEN:
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            llm_report = await loop.run_in_executor(
+                None,
+                generate_report,
+                eval_result["probabilities"],
+                eval_result["thresholds"],
+                {
+                    "prediction":       eval_result["prediction"],
+                    "confidence":       eval_result["confidence"],
+                    "threshold":        eval_result["threshold"],
+                    "threshold_cleared": eval_result["threshold_cleared"],
+                    "inconclusive":     eval_result["inconclusive"],
+                    "confidence_level": eval_result["confidence_level"],
+                },
+                HF_TOKEN,
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.error("generate_report raised unexpectedly: %s", exc)
+
+    return {**eval_result, "llm_report": llm_report}
 
 
 @app.get("/thresholds")

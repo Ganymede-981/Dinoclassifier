@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Copy source ──────────────────────────────────────────────────────────────
 COPY main.py .
+COPY llm_report.py .
 COPY download_model.py .
 
 # ── Paths & env ──────────────────────────────────────────────────────────────
