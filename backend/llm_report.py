@@ -18,6 +18,7 @@ Design decisions
 
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -117,17 +118,22 @@ def generate_report(
             )
             raw_text = response.choices[0].message.content.strip()
 
-            # Defensive stripping: smaller instruct models often ignore
-            # "no code fences" and wrap output in ```json … ``` anyway.
-            raw_text = (
-                raw_text
-                .removeprefix("```json")
-                .removeprefix("```")
-                .removesuffix("```")
-                .strip()
-            )
+            # Extract JSON robustly:
+            # 1. Try to find a ```json ... ``` fence anywhere in the text
+            # 2. Fall back to finding the first {...} JSON object
+            json_str = None
+            fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw_text)
+            if fence_match:
+                json_str = fence_match.group(1).strip()
+            else:
+                brace_match = re.search(r"\{[\s\S]*\}", raw_text)
+                if brace_match:
+                    json_str = brace_match.group(0).strip()
 
-            return json.loads(raw_text)
+            if not json_str:
+                raise json.JSONDecodeError("No JSON found in response", raw_text, 0)
+
+            return json.loads(json_str)
 
         except json.JSONDecodeError as exc:
             # LLM returned non-JSON — not worth retrying (it's a prompt issue)

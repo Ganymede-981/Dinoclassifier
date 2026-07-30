@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -15,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import snapshot_download
 from peft import PeftModel
 from PIL import Image
+from pydantic import BaseModel
 from transformers import Dinov2Model
 
 from llm_report import generate_report
@@ -247,35 +249,68 @@ async def predict(file: UploadFile):
         probs  = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
     eval_result = predict_calibrated(probs, threshold_map=THRESHOLDS)
+    return eval_result
 
-    # ── LLM report ────────────────────────────────────────────────────────────
-    # Generate asynchronously in a thread so the heavy Inference API call
-    # doesn't block the event loop.  If HF_TOKEN is empty the report module
-    # returns the graceful fallback dict immediately without any network call.
-    llm_report: dict = {"headline": "LLM report unavailable (no HF_TOKEN set)"}
-    if HF_TOKEN:
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            llm_report = await loop.run_in_executor(
-                None,
-                generate_report,
-                eval_result["probabilities"],
-                eval_result["thresholds"],
-                {
-                    "prediction":       eval_result["prediction"],
-                    "confidence":       eval_result["confidence"],
-                    "threshold":        eval_result["threshold"],
-                    "threshold_cleared": eval_result["threshold_cleared"],
-                    "inconclusive":     eval_result["inconclusive"],
-                    "confidence_level": eval_result["confidence_level"],
-                },
-                HF_TOKEN,
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.error("generate_report raised unexpectedly: %s", exc)
 
-    return {**eval_result, "llm_report": llm_report}
+# ── /explain ──────────────────────────────────────────────────────────────────
+# Separate endpoint so the UI can render predictions instantly and fetch the
+# LLM explanation asynchronously in a second request.
+
+class ExplainRequest(BaseModel):
+    probabilities:    dict[str, float]
+    thresholds:       dict[str, float]
+    prediction:       str
+    confidence:       float
+    threshold:        float
+    threshold_cleared: bool
+    inconclusive:     bool
+    confidence_level: str
+
+
+@app.post("/explain")
+async def explain(req: ExplainRequest):
+    """Generate a plain-language LLM report from the classifier's output."""
+    if not HF_TOKEN:
+        return {
+            "llm_report": {
+                "headline":         "LLM report unavailable (no HF_TOKEN set)",
+                "explanation":      "Set HF_TOKEN as a Space secret to enable AI explanations.",
+                "confidence_level": req.confidence_level,
+                "inconclusive":     req.inconclusive,
+                "disclaimer":       "This is not a medical diagnosis. Please consult a dermatologist.",
+            }
+        }
+
+    eval_result = {
+        "prediction":        req.prediction,
+        "confidence":        req.confidence,
+        "threshold":         req.threshold,
+        "threshold_cleared": req.threshold_cleared,
+        "inconclusive":      req.inconclusive,
+        "confidence_level":  req.confidence_level,
+    }
+
+    try:
+        loop = asyncio.get_running_loop()
+        llm_report = await loop.run_in_executor(
+            None,
+            generate_report,
+            dict(req.probabilities),
+            dict(req.thresholds),
+            eval_result,
+            HF_TOKEN,
+        )
+    except Exception as exc:
+        logger.error("generate_report raised unexpectedly: %s", exc)
+        llm_report = {
+            "headline":         "Unable to generate explanation",
+            "explanation":      "The report could not be generated automatically.",
+            "confidence_level": req.confidence_level,
+            "inconclusive":     req.inconclusive,
+            "disclaimer":       "This is not a medical diagnosis. Please consult a dermatologist.",
+        }
+
+    return {"llm_report": llm_report}
 
 
 @app.get("/thresholds")
